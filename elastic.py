@@ -1,7 +1,9 @@
+"""Elasticsearch wrapper with text and vector search using LLM embeddings."""
+
 import logging
 from typing import List
-from elasticsearch import Elasticsearch
 import chardet
+from elasticsearch import Elasticsearch
 from langchain_ollama import OllamaEmbeddings
 from langchain_community.llms import Ollama
 from config import OLLAMA_HOST
@@ -29,20 +31,18 @@ class ElasticModule:
         """Ensure the user index exists in Elasticsearch."""
         if self.es.indices.exists(index=user_id):
             logger.info("Index '%s' already exists.", user_id)
-        else:
-            body = {
-                "mappings": {
-                    "properties": {
-                        "content": {"type": "text"},
-                        "embedding": {
-                            "type": "dense_vector",
-                            "dims": 4096
-                        }
-                    }
+            return
+
+        body = {
+            "mappings": {
+                "properties": {
+                    "content": {"type": "text"},
+                    "embedding": {"type": "dense_vector", "dims": 4096},
                 }
             }
-            self.es.indices.create(index=user_id, body=body)
-            logger.info("Index '%s' was created.", user_id)
+        }
+        self.es.indices.create(index=user_id, body=body)
+        logger.info("Index '%s' was created.", user_id)
 
     def clear_index(self, user_id: str) -> None:
         """Delete user index."""
@@ -53,35 +53,39 @@ class ElasticModule:
         """Add document to Elasticsearch index."""
         self.es.index(
             index=user_id,
-            body={
-                "content": content,
-                "embedding": embedding
-            }
+            body={"content": content, "embedding": embedding},
         )
 
     async def get_embedding(self, text: str) -> List[float]:
         """Request embedding for a given text from external service."""
         try:
             vector = embeddings.embed_query(text)
-            if not vector or not isinstance(vector, list) or not all(isinstance(v, (float, int)) for v in vector):
-                logger.error(f"Invalid embedding returned: {vector}")
+            if (
+                not vector
+                or not isinstance(vector, list)
+                or not all(isinstance(v, (float, int)) for v in vector)
+            ):
+                logger.error("Invalid embedding returned: %s", vector)
                 raise ValueError("Embedding must be a list of floats")
             return vector
-        except Exception as e:
-            logger.error(f"Error while getting embedding: {e}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error("Error while getting embedding: %s", exc)
             raise
 
-    async def add_text_file(self, user_id: str, file_path: str, chunk_size: int = 100) -> None:
+    async def add_text_file(
+        self, user_id: str, file_path: str, chunk_size: int = 100
+    ) -> None:
         """Chunk a text file and add all parts with embeddings to the index."""
-        with open(file_path, "rb") as f:
-            raw_data = f.read()
+        with open(file_path, "rb") as file:
+            raw_data = file.read()
             result = chardet.detect(raw_data)
-            encoding = result['encoding'] or 'utf-8'
+            encoding = result.get("encoding", "utf-8") or "utf-8"
 
         text = raw_data.decode(encoding)
-
         words = text.split()
-        chunks = [" ".join(words[i:i + chunk_size]) for i in range(0, len(words), chunk_size)]
+        chunks = [
+            " ".join(words[i : i + chunk_size]) for i in range(0, len(words), chunk_size)
+        ]
 
         logger.info("Loaded %d chunks from file '%s'.", len(chunks), file_path)
 
@@ -89,28 +93,25 @@ class ElasticModule:
             embedding = await self.get_embedding(chunk)
             self.add_document(user_id, chunk, embedding)
 
-    def search_documents_text(self, user_id: str, query: str, top_k: int = 5) -> List[str]:
+    def search_documents_text(
+        self, user_id: str, query: str, top_k: int = 5
+    ) -> List[str]:
         """Search documents by text query."""
         try:
             response = self.es.search(
                 index=user_id,
-                body={
-                    "size": top_k,
-                    "query": {
-                        "match": {
-                            "content": query
-                        }
-                    }
-                }
+                body={"size": top_k, "query": {"match": {"content": query}}},
             )
-        except Exception as e:
-            logger.error(f"Ошибка при поиске по тексту: {e}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error("Error during text search: %s", exc)
             return []
 
-        hits = response["hits"]["hits"]
+        hits = response.get("hits", {}).get("hits", [])
         return [hit["_source"]["content"] for hit in hits]
 
-    def search_documents_vector(self, user_id: str, embedding: List[float], top_k: int = 5) -> List[str]:
+    def search_documents_vector(
+        self, user_id: str, embedding: List[float], top_k: int = 5
+    ) -> List[str]:
         """Search documents by embedding vector."""
         try:
             response = self.es.search(
@@ -121,16 +122,19 @@ class ElasticModule:
                         "script_score": {
                             "query": {"match_all": {}},
                             "script": {
-                                "source": "cosineSimilarity(params.query_vector, 'embedding') + 1.0",
-                                "params": {"query_vector": embedding}
-                            }
+                                "source": (
+                                    "cosineSimilarity(params.query_vector, "
+                                    "'embedding') + 1.0"
+                                ),
+                                "params": {"query_vector": embedding},
+                            },
                         }
-                    }
-                }
+                    },
+                },
             )
-        except Exception as e:
-            logger.error(f"Ошибка при векторном поиске: {e}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            logger.error("Error during vector search: %s", exc)
             return []
 
-        hits = response["hits"]["hits"]
+        hits = response.get("hits", {}).get("hits", [])
         return [hit["_source"]["content"] for hit in hits]
